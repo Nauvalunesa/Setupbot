@@ -1,81 +1,89 @@
 #!/bin/bash
 set -e
-
 SSHD_CONFIG="/etc/ssh/sshd_config"
-SSHD_DIR="/etc/ssh/sshd_config.d"
 BACKUP_SUFFIX="$(date +%F_%H-%M-%S)"
-
 echo "[*] Detecting OS & package manager..."
-
-# Detect package manager
+# 1. Detect Package Manager & SFTP Path
 if command -v apt >/dev/null 2>&1; then
-    PKG_INSTALL="apt update && apt install -y openssh-server"
+    PKG_MGR="apt"
+    SFTP_PATH="/usr/lib/openssh/sftp-server"
 elif command -v dnf >/dev/null 2>&1; then
-    PKG_INSTALL="dnf install -y openssh-server"
+    PKG_MGR="dnf"
+    SFTP_PATH="/usr/libexec/openssh/sftp-server"
 elif command -v yum >/dev/null 2>&1; then
-    PKG_INSTALL="yum install -y openssh-server"
+    PKG_MGR="yum"
+    SFTP_PATH="/usr/libexec/openssh/sftp-server"
+elif command -v apk >/dev/null 2>&1; then
+    PKG_MGR="apk"
+    SFTP_PATH="/usr/lib/ssh/sftp-server"
+elif command -v pacman >/dev/null 2>&1; then
+    PKG_MGR="pacman"
+    SFTP_PATH="/usr/lib/ssh/sftp-server"
 else
-    echo "[!] Package manager tidak dikenali"
-    exit 1
+    # Fallback default
+    PKG_MGR="unknown"
+    SFTP_PATH="/usr/lib/openssh/sftp-server"
 fi
-
-# Install openssh-server if missing
+# 2. Install openssh-server if missing
 if ! command -v sshd >/dev/null 2>&1; then
-    echo "[*] Installing openssh-server..."
-    eval "$PKG_INSTALL"
+    echo "[*] Installing openssh-server via $PKG_MGR..."
+    case $PKG_MGR in
+        apt) apt update && apt install -y openssh-server ;;
+        dnf) dnf install -y openssh-server ;;
+        yum) yum install -y openssh-server ;;
+        apk) apk add openssh ;;
+        pacman) pacman -Sy --noconfirm openssh ;;
+        *) echo "[!] Cannot install automatically, package manager unknown." ;;
+    esac
 fi
-
-# Backup sshd_config
-if [ -f "$SSHD_CONFIG" ]; then
-    cp "$SSHD_CONFIG" "${SSHD_CONFIG}.bak.${BACKUP_SUFFIX}"
+# 3. Backup sshd_config
+[ -f "$SSHD_CONFIG" ] && cp "$SSHD_CONFIG" "${SSHD_CONFIG}.bak.${BACKUP_SUFFIX}"
+# 4. Handle Debian/Ubuntu overrides in sshd_config.d
+if [ -d "/etc/ssh/sshd_config.d" ]; then
+    echo "[*] Disabling sshd_config.d overrides (Debian/Ubuntu Specific)..."
+    # Kita tidak hapus, tapi kita pindahkan agar tidak dibaca oleh SSH
+    mkdir -p /etc/ssh/sshd_config_disabled
+    mv /etc/ssh/sshd_config.d/*.conf /etc/ssh/sshd_config_disabled/ 2>/dev/null || true
 fi
-
-# Nonaktifkan sshd_config.d override
-if [ -d "$SSHD_DIR" ]; then
-    echo "[*] Disabling $SSHD_DIR overrides..."
-    mkdir -p "${SSHD_DIR}.disabled"
-    mv "$SSHD_DIR"/*.conf "${SSHD_DIR}.disabled/" 2>/dev/null || true
-fi
-
-# Pastikan file ada
-touch "$SSHD_CONFIG"
-
-# Bersihkan directive lama
-sed -i '/^Port /d' "$SSHD_CONFIG"
-sed -i '/^PermitRootLogin /d' "$SSHD_CONFIG"
-sed -i '/^PasswordAuthentication /d' "$SSHD_CONFIG"
-sed -i '/^PubkeyAuthentication /d' "$SSHD_CONFIG"
-sed -i '/^KbdInteractiveAuthentication /d' "$SSHD_CONFIG"
-
-# Tambahkan konfigurasi FIX
-cat >> "$SSHD_CONFIG" <<EOF
-
-# === FORCE SSH SETTINGS ===
+# 5. Reset and Apply Config (Clean Method)
+echo "[*] Applying universal SSH configuration..."
+# Ambil config asli tanpa parameter yang mau kita ubah
+grep -vE "^Port|^PermitRootLogin|^PasswordAuthentication|^PubkeyAuthentication|^KbdInteractiveAuthentication|^Subsystem\s+sftp" "$SSHD_CONFIG" > "${SSHD_CONFIG}.tmp" || true
+# Tambahkan pengaturan kita
+cat >> "${SSHD_CONFIG}.tmp" <<EOF
+# === SSH AUTO SETUP BY BOT ===
 Port 22
 PermitRootLogin yes
 PasswordAuthentication yes
 PubkeyAuthentication yes
 KbdInteractiveAuthentication no
+Subsystem sftp $SFTP_PATH
 EOF
-
-# Pastikan subsystem sftp
-grep -q "^Subsystem\s\+sftp" "$SSHD_CONFIG" || \
-echo "Subsystem sftp /usr/lib/openssh/sftp-server" >> "$SSHD_CONFIG"
-
-# Restart SSH service
+mv "${SSHD_CONFIG}.tmp" "$SSHD_CONFIG"
+chmod 644 "$SSHD_CONFIG"
+# 6. Restart SSH Service (Debian/Universal Smart Restart)
 echo "[*] Restarting SSH service..."
-if systemctl list-unit-files | grep -q '^ssh.service'; then
-    systemctl enable --now ssh
-elif systemctl list-unit-files | grep -q '^sshd.service'; then
-    systemctl enable --now sshd
+if command -v systemctl >/dev/null 2>&1; then
+    # Cek jika menggunakan ssh.socket (Debian 12+)
+    if systemctl is-active --quiet ssh.socket; then
+        systemctl stop ssh.socket || true
+    fi
+    # Cek nama service yang ada
+    if systemctl list-unit-files | grep -q '^ssh.service'; then
+        SVC="ssh"
+    else
+        SVC="sshd"
+    fi
+    systemctl unmask $SVC || true
+    systemctl enable $SVC || true
+    systemctl restart $SVC
+elif command -v rc-service >/dev/null 2>&1; then
+    rc-service sshd restart || rc-service ssh restart || true
 else
-    service ssh restart || service sshd restart
+    /etc/init.d/ssh restart || /etc/init.d/sshd restart || true
 fi
-
-# Verifikasi konfigurasi AKTUAL
-echo
-echo "[*] Effective SSH config:"
-sshd -T | grep -iE 'port |permitrootlogin|passwordauthentication|pubkeyauthentication'
-
-echo
-echo "[✓] SSH configuration applied successfully"
+# 7. Verification
+echo "[*] Result:"
+sshd -t && echo "Config OK" || echo "Config Error"
+grep -iE 'permitrootlogin|passwordauthentication' "$SSHD_CONFIG" | grep -v "^#"
+echo "[✓] SSH setup completed."
