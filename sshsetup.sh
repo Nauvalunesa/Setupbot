@@ -1,11 +1,9 @@
 #!/bin/bash
 set -e
 
-echo "[🔥] SSH UNIVERSAL (NO FIREWALL - UPDATED)"
+echo "[🔥] SSH UNIVERSAL FORCE MODE (NO FACTORY CONFIG)"
 
 SSHD_CONFIG="/etc/ssh/sshd_config"
-SSHD_DIR="/etc/ssh/sshd_config.d"
-CUSTOM_CONF="$SSHD_DIR/99-universal.conf"
 
 # ================================
 # Detect package manager + SFTP
@@ -39,26 +37,32 @@ if ! command -v sshd >/dev/null 2>&1; then
 fi
 
 # ================================
-# Ensure config dir exists
+# 🔥 REMOVE semua override config
 # ================================
-mkdir -p "$SSHD_DIR"
+echo "[*] Removing ALL override configs..."
+
+rm -rf /etc/ssh/sshd_config.d 2>/dev/null || true
+mkdir -p /etc/ssh/sshd_config.d
+
+# cloud-init killer
+rm -f /etc/ssh/sshd_config.d/50-cloud-init.conf 2>/dev/null || true
 
 # ================================
-# 🔥 HARD FIX: remove all conflicting configs
+# 🔥 FORCE disable factory config
 # ================================
-echo "[*] Cleaning conflicting SSH configs..."
-
-# backup semua config tambahan
-mkdir -p /etc/ssh/backup_config 2>/dev/null || true
-mv /etc/ssh/sshd_config.d/*.conf /etc/ssh/backup_config/ 2>/dev/null || true
+if [ -f "/usr/share/factory/etc/ssh/sshd_config" ]; then
+    echo "[*] Disabling factory ssh config..."
+    mv /usr/share/factory/etc/ssh/sshd_config \
+       /usr/share/factory/etc/ssh/sshd_config.bak 2>/dev/null || true
+fi
 
 # ================================
-# Write universal config (override)
+# 🔥 WRITE CLEAN CONFIG (MAIN FILE)
 # ================================
-echo "[*] Writing SSH config..."
+echo "[*] Writing clean sshd_config..."
 
-cat > "$CUSTOM_CONF" <<EOF
-# === UNIVERSAL SSH CONFIG (FORCE MODE) ===
+cat > "$SSHD_CONFIG" <<EOF
+# === SSH UNIVERSAL FORCE CONFIG ===
 
 Port 22
 
@@ -73,7 +77,7 @@ ChallengeResponseAuthentication no
 Subsystem sftp $SFTP
 EOF
 
-chmod 644 "$CUSTOM_CONF"
+chmod 644 "$SSHD_CONFIG"
 
 # ================================
 # Ensure root password exists
@@ -84,59 +88,42 @@ if passwd -S root 2>/dev/null | grep -q "NP"; then
 fi
 
 # ================================
-# Fix shell root (IMPORTANT)
+# Fix root shell (ANTI BUG)
 # ================================
-if ! grep -q "/bin/bash" /etc/passwd; then
-    echo "[*] Fixing root shell..."
-    usermod -s /bin/bash root 2>/dev/null || true
-fi
+usermod -s /bin/bash root 2>/dev/null || true
 
 # ================================
-# Fix permission
+# 🔥 FORCE systemd override (ANTI ALL DISTRO)
 # ================================
-chmod 700 /root 2>/dev/null || true
-
-# ================================
-# Restart SSH (ALL DISTRO SAFE)
-# ================================
-echo "[*] Restarting SSH..."
-
 if command -v systemctl >/dev/null 2>&1; then
 
+    echo "[*] Creating systemd override..."
+
+    mkdir -p /etc/systemd/system/sshd.service.d
+
+    cat > /etc/systemd/system/sshd.service.d/override.conf <<EOF
+[Service]
+ExecStart=
+ExecStart=/sbin/sshd -D -f /etc/ssh/sshd_config
+EOF
+
+    # stop socket (Debian 12+)
     systemctl stop ssh.socket 2>/dev/null || true
 
-    systemctl unmask ssh 2>/dev/null || true
-    systemctl unmask sshd 2>/dev/null || true
-
-    if systemctl list-unit-files | grep -q '^sshd.service'; then
-        SVC="sshd"
-    else
-        SVC="ssh"
-    fi
-
     systemctl daemon-reexec || true
-    systemctl enable $SVC || true
-    systemctl restart $SVC
+    systemctl daemon-reload
 
-elif command -v rc-service >/dev/null 2>&1; then
-    rc-service sshd restart || rc-service ssh restart || true
-
+    systemctl restart sshd 2>/dev/null || systemctl restart ssh
 else
-    /etc/init.d/sshd restart || /etc/init.d/ssh restart || true
+    killall sshd 2>/dev/null || true
+    /sbin/sshd
 fi
 
 # ================================
-# Verification
+# VERIFY
 # ================================
-echo "[*] Testing config..."
+echo "[*] Verifying..."
 
-if sshd -t; then
-    echo "[✓] Config OK"
-else
-    echo "[✗] Config ERROR"
-fi
+/sbin/sshd -T | grep -E 'permitrootlogin|passwordauthentication|usepam'
 
-echo "[*] Active config:"
-sshd -T | grep -E 'permitrootlogin|passwordauthentication|usepam'
-
-echo "[🔥] DONE - SSH READY (FORCE MODE)"
+echo "[🔥] DONE - FORCE MODE ACTIVE"
