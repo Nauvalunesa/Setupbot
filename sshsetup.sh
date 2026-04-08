@@ -1,8 +1,9 @@
 #!/bin/bash
 set -e
 
-echo "[🔥] SSH UNIVERSAL (NO FIREWALL)"
+echo "[🔥] SSH UNIVERSAL (NO FIREWALL - UPDATED)"
 
+SSHD_CONFIG="/etc/ssh/sshd_config"
 SSHD_DIR="/etc/ssh/sshd_config.d"
 CUSTOM_CONF="$SSHD_DIR/99-universal.conf"
 
@@ -43,20 +44,21 @@ fi
 mkdir -p "$SSHD_DIR"
 
 # ================================
-# Disable cloud-init override
+# 🔥 HARD FIX: remove all conflicting configs
 # ================================
-if [ -f "/etc/ssh/sshd_config.d/50-cloud-init.conf" ]; then
-    echo "[*] Disable cloud-init override"
-    mv /etc/ssh/sshd_config.d/50-cloud-init.conf /etc/ssh/sshd_config.d/50-cloud-init.conf.bak || true
-fi
+echo "[*] Cleaning conflicting SSH configs..."
+
+# backup semua config tambahan
+mkdir -p /etc/ssh/backup_config 2>/dev/null || true
+mv /etc/ssh/sshd_config.d/*.conf /etc/ssh/backup_config/ 2>/dev/null || true
 
 # ================================
-# Write universal config
+# Write universal config (override)
 # ================================
 echo "[*] Writing SSH config..."
 
 cat > "$CUSTOM_CONF" <<EOF
-# === UNIVERSAL SSH CONFIG (NO FIREWALL) ===
+# === UNIVERSAL SSH CONFIG (FORCE MODE) ===
 
 Port 22
 
@@ -82,6 +84,14 @@ if passwd -S root 2>/dev/null | grep -q "NP"; then
 fi
 
 # ================================
+# Fix shell root (IMPORTANT)
+# ================================
+if ! grep -q "/bin/bash" /etc/passwd; then
+    echo "[*] Fixing root shell..."
+    usermod -s /bin/bash root 2>/dev/null || true
+fi
+
+# ================================
 # Fix permission
 # ================================
 chmod 700 /root 2>/dev/null || true
@@ -93,7 +103,6 @@ echo "[*] Restarting SSH..."
 
 if command -v systemctl >/dev/null 2>&1; then
 
-    # Stop socket (Debian 12+)
     systemctl stop ssh.socket 2>/dev/null || true
 
     systemctl unmask ssh 2>/dev/null || true
@@ -130,4 +139,4 @@ fi
 echo "[*] Active config:"
 sshd -T | grep -E 'permitrootlogin|passwordauthentication|usepam'
 
-echo "[🔥] DONE - SSH READY (NO FIREWALL MODE)"
+echo "[🔥] DONE - SSH READY (FORCE MODE)"
