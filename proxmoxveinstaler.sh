@@ -2,117 +2,164 @@
 set -euo pipefail
 
 echo "==========================================="
-echo "   🌟 Nauval Proxmox VE Installer 🌟"
-echo "   No-Subscription + SSL Fix + NAT setup"
+echo " 🌟 Nauval Proxmox VE Installer (FINAL SAFE) 🌟"
+echo " No-Subscription + SSL + Anti-Stuck"
+echo " ⚠️ NETWORK TIDAK DISENTUH"
 echo "==========================================="
 sleep 2
 
-# Pastikan OS Debian
-if ! grep -qi "debian" /etc/os-release; then
-    echo "❌ Script ini hanya untuk Debian."
+# ==============================
+# ✅ VALIDASI OS (STRICT: harus Debian 12 Bookworm)
+# ==============================
+if [ ! -f /etc/os-release ]; then
+    echo "❌ Tidak ditemukan /etc/os-release. Batalkan."
     exit 1
 fi
 
-echo "🚀 Update sistem..."
-apt update && apt upgrade -y
-apt install curl wget gnupg2 ca-certificates -y
+. /etc/os-release
 
-echo "🌍 Deteksi IP publik..."
-PUB_IP=$(curl -4 -s ifconfig.me)
+if [ "${ID:-}" != "debian" ]; then
+    echo "❌ Script ini hanya untuk Debian (ID=$ID terdeteksi)."
+    exit 1
+fi
+
+CODENAME="${VERSION_CODENAME:-}"
+
+if [ "$CODENAME" != "bookworm" ] && [ "$CODENAME" != "trixie" ]; then
+    echo "❌ Codename '${CODENAME:-tidak diketahui}' tidak didukung."
+    echo "   Proxmox VE 8 -> Debian 12 (Bookworm)"
+    echo "   Proxmox VE 9 -> Debian 13 (Trixie)"
+    exit 1
+fi
+
+if [ "$CODENAME" = "bookworm" ]; then
+    PVE_SUITE="bookworm"
+    PVE_MAJOR="8"
+else
+    PVE_SUITE="trixie"
+    PVE_MAJOR="9"
+fi
+
+echo "✅ OS terverifikasi: Debian ($CODENAME) -> akan install Proxmox VE $PVE_MAJOR"
+
+# ==============================
+# ⏳ WAIT APT LOCK
+# ==============================
+echo "⏳ Waiting apt lock..."
+while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 2; done
+
+# ==============================
+# 🔥 ANTI HANG IFUPDOWN2
+# ==============================
+echo "🛑 Disable network reload..."
+ln -sf /bin/true /usr/sbin/ifreload
+export IFUPDOWN_SKIP_RELOAD=1
+export DEBIAN_FRONTEND=noninteractive
+
+# ==============================
+# 🧹 HAPUS ENTERPRISE REPO (SEBELUM INSTALL)
+# ==============================
+echo "🧹 Remove enterprise repo..."
+rm -f /etc/apt/sources.list.d/pve-enterprise.list || true
+
+# ==============================
+# 📦 PASTIKAN REPO DASAR DEBIAN BOOKWORM LENGKAP
+# (Ini bagian penting yang hilang di script lama — kalau sources.list
+#  tidak lengkap/salah, paket dependency Proxmox seperti libaio1,
+#  libfuse3-3, libgnutlsxx30, perlapi-5.36.0 tidak akan ketemu)
+# ==============================
+echo "📦 Menulis ulang sources.list dasar Debian ($PVE_SUITE)..."
+cp /etc/apt/sources.list /etc/apt/sources.list.bak.$(date +%s) 2>/dev/null || true
+
+cat > /etc/apt/sources.list <<EOF
+deb http://deb.debian.org/debian $PVE_SUITE main contrib non-free non-free-firmware
+deb http://deb.debian.org/debian $PVE_SUITE-updates main contrib non-free non-free-firmware
+deb http://security.debian.org/debian-security $PVE_SUITE-security main contrib non-free non-free-firmware
+EOF
+
+# ==============================
+# 🚀 UPDATE SYSTEM
+# ==============================
+apt update
+apt full-upgrade -y
+apt install -y curl wget gnupg2 ca-certificates lsb-release
+
+# ==============================
+# 🌍 INFO SYSTEM
+# ==============================
+PUB_IP=$(curl -4 -s ifconfig.me || echo "0.0.0.0")
 HOSTNAME=$(hostname)
 
 echo "✅ Hostname: $HOSTNAME"
 echo "✅ IP publik: $PUB_IP"
 
-echo "🔧 Perbaiki mapping hostname..."
-if [ -f /etc/cloud/templates/hosts.debian.tmpl ]; then
-    # Patch template cloud-init jika ada
-    sed -i "s/^127\.0\.1\.1.*/$PUB_IP {{fqdn}} {{hostname}}/" /etc/cloud/templates/hosts.debian.tmpl
-elif [ -f /etc/cloud/cloud.cfg ]; then
-    # Disable manage_etc_hosts agar tidak overwrite
-    sed -i 's/manage_etc_hosts: true/manage_etc_hosts: false/' /etc/cloud/cloud.cfg || true
-    # Tambahkan langsung ke /etc/hosts
-    sed -i "/$HOSTNAME/d" /etc/hosts
-    echo "$PUB_IP $HOSTNAME" >> /etc/hosts
+# ==============================
+# 🔧 HOST FIX
+# ==============================
+sed -i "/$HOSTNAME/d" /etc/hosts
+echo "$PUB_IP $HOSTNAME" >> /etc/hosts
+
+# ==============================
+# 📡 SET REPO NO-SUBSCRIPTION
+# ==============================
+echo "deb http://download.proxmox.com/debian/pve $PVE_SUITE pve-no-subscription" \
+> /etc/apt/sources.list.d/pve-install-repo.list
+
+if [ "$PVE_SUITE" = "trixie" ]; then
+    wget -q "https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg" \
+        -O "/etc/apt/trusted.gpg.d/proxmox-archive-keyring.gpg"
 else
-    # Kalau cloud-init tidak ada sama sekali → langsung patch /etc/hosts
-    sed -i "/$HOSTNAME/d" /etc/hosts
-    echo "$PUB_IP $HOSTNAME" >> /etc/hosts
+    wget -q "https://enterprise.proxmox.com/debian/proxmox-release-${PVE_SUITE}.gpg" -O- \
+    | gpg --dearmor -o "/etc/apt/trusted.gpg.d/proxmox-release-${PVE_SUITE}.gpg"
 fi
 
-echo "📡 Tambahkan repository Proxmox VE (no-subscription)..."
-echo "deb http://download.proxmox.com/debian/pve bookworm pve-no-subscription" \
-    > /etc/apt/sources.list.d/pve-install-repo.list
-
-echo "🔑 Import kunci GPG Proxmox..."
-wget -q https://enterprise.proxmox.com/debian/proxmox-release-bookworm.gpg -O- \
-    | gpg --dearmor -o /etc/apt/trusted.gpg.d/proxmox-release-bookworm.gpg
-
-echo "📦 Update repository..."
 apt update
 
-echo "🖥️ Install kernel Proxmox..."
-apt install proxmox-default-kernel -y
+# ==============================
+# 🖥️ INSTALL PROXMOX
+# ==============================
+apt install -y proxmox-default-kernel
 
-echo "🛠️ Install paket Proxmox VE..."
-apt install proxmox-ve postfix open-iscsi -y
+if ! apt install -y proxmox-ve postfix open-iscsi chrony; then
+    echo "⚠️ Install pertama gagal, mencoba perbaikan dependency otomatis..."
+    apt --fix-broken install -y
+    apt install -y proxmox-ve postfix open-iscsi chrony
+fi
 
-echo "🔒 Fix SSL issue..."
-apt install --reinstall ca-certificates -y
+# ==============================
+# 🔒 FIX SSL
+# ==============================
+apt install --reinstall -y ca-certificates
 update-ca-certificates -f
 
-if [ -f /etc/apt/sources.list.d/pve-enterprise.list ]; then
-    rm /etc/apt/sources.list.d/pve-enterprise.list
-    echo "🧹 Repo enterprise dihapus."
-fi
+# ==============================
+# 🔕 REMOVE SUBSCRIPTION POPUP
+# ==============================
+sed -i "s/data.status !== 'Active'/false/g" \
+/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js || true
 
-echo "🌐 Setup vmbr1 bridge..."
-cat <<EOF >> /etc/network/interfaces
+systemctl restart pveproxy
 
-auto vmbr1
-iface vmbr1 inet static
-    address 192.168.11.1
-    netmask 255.255.255.0
-    bridge-ports none
-    bridge-stp off
-    bridge-fd 0
-EOF
+# ==============================
+# ⚡ OPTIONAL PERFORMANCE
+# ==============================
+systemctl disable --now pve-ha-lrm 2>/dev/null || true
+systemctl disable --now pve-ha-crm 2>/dev/null || true
 
-echo "⚡ Aktifkan ulang networking agar vmbr1 langsung hidup..."
-systemctl restart networking
-
-echo "🔧 Setup NAT untuk vmbr1..."
-PUB_IFACE=$(ip route | awk '/default/ {print $5}' | head -n1)
-VM_IFACE="vmbr1"
-VM_SUBNET="192.168.11.0/24"
-
-sysctl -w net.ipv4.ip_forward=1 >/dev/null
-
-iptables -t nat -F
-iptables -F FORWARD
-iptables -t nat -A POSTROUTING -s $VM_SUBNET -o $PUB_IFACE -j MASQUERADE
-iptables -A FORWARD -i $VM_IFACE -o $PUB_IFACE -j ACCEPT
-iptables -A FORWARD -i $PUB_IFACE -o $VM_IFACE -m state --state RELATED,ESTABLISHED -j ACCEPT
-
-echo "✅ NAT & forwarding rules aktif."
-
-if ! command -v netfilter-persistent >/dev/null 2>&1; then
-    echo "📦 Install iptables-persistent..."
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq
-    apt-get install -y iptables-persistent netfilter-persistent
-fi
-
-echo "💾 Simpan rules..."
-netfilter-persistent save
-
-echo "🔑 Regenerate SSL cert Proxmox..."
+# ==============================
+# 🔑 REGENERATE CERT
+# ==============================
 pvecm updatecerts -f || true
 systemctl restart pveproxy || true
 
-echo "🎉 Proxmox VE terpasang, vmbr1 dibuat & aktif, NAT jalan."
-echo "🌍 Akses GUI: https://$PUB_IP:8006"
-
-echo "🔄 Reboot otomatis dalam 5 detik..."
-sleep 5
-reboot
+# ==============================
+# 🎉 DONE
+# ==============================
+echo "==========================================="
+echo "🎉 Proxmox VE install selesai!"
+echo "🌍 Akses: https://$PUB_IP:8006"
+echo "==========================================="
+echo ""
+echo "✅ TANPA repo enterprise"
+echo "✅ Network tidak diubah"
+echo "⚠️ Reboot disarankan (kernel Proxmox baru butuh reboot untuk aktif)"
