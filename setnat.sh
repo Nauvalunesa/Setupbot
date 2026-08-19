@@ -21,10 +21,6 @@ VM_SUBNET="192.168.11.0/24"
 echo "🔧 Aktifkan IP forwarding..."
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
 
-# --- Flush old rules (optional, bisa di-comment kalau mau preserve) ---
-iptables -t nat -F
-iptables -F FORWARD
-
 # --- NAT outbound ---
 iptables -t nat -A POSTROUTING -s $VM_SUBNET -o $PUB_IFACE -j MASQUERADE
 
